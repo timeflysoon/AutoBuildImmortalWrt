@@ -22,16 +22,10 @@ EOF
 echo "cat pppoe-settings"
 cat /home/build/immortalwrt/files/etc/config/pppoe-settings
 
-# 添加架构aarch64_generic 
-sed -i '1i\
-arch aarch64_generic 10\n\
-arch aarch64_cortex-a53 15' repositories
-
-
 # 输出调试信息
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建固件..."
-echo "查看repositories.conf信息——————"
-cat repositories.conf
+echo "查看repositories信息——————"
+cat repositories
 # 定义所需安装的包列表 下列插件你都可以自行删减
 PACKAGES=""
 PACKAGES="$PACKAGES curl"
