@@ -1,200 +1,170 @@
 #!/bin/sh
-# 99-custom.sh - ImmortalWrt 首次启动预配置脚本（完善版）
+# 99-custom.sh 就是immortalwrt固件首次启动时运行的脚本 位于固件内的/etc/uci-defaults/99-custom.sh
 
-# ==================== 日志记录 ====================
+# Log file for debugging
 LOGFILE="/etc/config/uci-defaults-log.txt"
-echo "Starting 99-custom.sh at $(date)" >> "$LOGFILE"
+echo "Starting 99-custom.sh at $(date)" >> $LOGFILE
 
-# ==================== 用户参数（可在此直接修改） ====================
-root_password=""
-lan_ip_address="192.168.2.1/24"          # 优先使用此 IP，若为空则尝试读取 /etc/config/custom_router_ip.txt
-wlan_name="ImmortalWrt"
-wlan_password="12345678"
-pppoe_username=""                         # PPPoE 账号（可选）
-pppoe_password=""                         # PPPoE 密码（可选）
+# 设置默认防火墙规则，方便单网口虚拟机首次访问 WebUI
+uci set firewall.@zone[1].input='ACCEPT'
 
-# ==================== 默认值（安全覆盖） ====================
-: "${lan_ip_address:=}"
-: "${wlan_name:=ImmortalWrt}"
-: "${wlan_password:=12345678}"
-: "${pppoe_username:=}"
-: "${pppoe_password:=}"
-
-# ==================== 防火墙（放行 WAN 区，确保首次访问 WebUI） ====================
-wan_zone=$(uci show firewall 2>/dev/null | grep "=zone" | grep "wan" | cut -d. -f2 | cut -d= -f1 | head -n1)
-if [ -n "$wan_zone" ]; then
-    uci set firewall.$wan_zone.input='ACCEPT'
-    uci set firewall.$wan_zone.output='ACCEPT'
-    uci set firewall.$wan_zone.forward='ACCEPT'
-    uci commit firewall
-    echo "Firewall WAN zone enabled (first login safe)" >> "$LOGFILE"
-else
-    # 回退方案：直接修改索引为 1 的 zone（常见为 wan）
-    uci -q set firewall.@zone[1].input='ACCEPT'
-    uci commit firewall 2>/dev/null
-    echo "Firewall fallback: set @zone[1].input=ACCEPT" >> "$LOGFILE"
-fi
-
-# ==================== Android TV DNS 修复 ====================
-uci -q delete dhcp.android_fix 2>/dev/null
+# 设置主机名映射，解决安卓原生 TV 无法联网的问题
 uci add dhcp domain
 uci set "dhcp.@domain[-1].name=time.android.com"
 uci set "dhcp.@domain[-1].ip=203.107.6.88"
-uci commit dhcp
-echo "Android DNS fix applied" >> "$LOGFILE"
 
-# ==================== 检查 PPPoE 外部配置文件（可选） ====================
+# 检查配置文件pppoe-settings是否存在 该文件由build.sh动态生成
 SETTINGS_FILE="/etc/config/pppoe-settings"
-if [ -f "$SETTINGS_FILE" ]; then
+if [ ! -f "$SETTINGS_FILE" ]; then
+    echo "PPPoE settings file not found. Skipping." >> $LOGFILE
+else
+    # 读取pppoe信息($enable_pppoe、$pppoe_account、$pppoe_password)
     . "$SETTINGS_FILE"
-    echo "Loaded external PPPoE settings" >> "$LOGFILE"
 fi
 
-# ==================== 收集物理网卡（精确过滤） ====================
-ifnames=$(ls /sys/class/net/ | grep -E '^(eth|en|p)' | grep -vE '(@|\.|:|veth|docker)' | sort)
-ifaces="$ifnames"
+# ==================== 网口判断逻辑（用户提供 + grok 优化） ====================
+
+# 1. 收集所有物理网卡
+ifaces=""
+for iface in /sys/class/net/*; do
+    name=$(basename "$iface")
+    [ "$name" = "lo" ] && continue
+    [ -e "$iface/device" ] && ifaces="$ifaces $name"
+done
+
+# 2. 稳定排序（版本排序，保证顺序一致）
+ifaces=$(echo "$ifaces" | tr ' ' '\n' | sort -V | tr '\n' ' ')
+ifaces=$(echo "$ifaces" | awk '{$1=$1};1')
 PORT_COUNT=$(echo "$ifaces" | wc -w)
-echo "Detected interfaces: $ifaces | Count: $PORT_COUNT" >> "$LOGFILE"
+
+echo "Detected interfaces: $ifaces" >> $LOGFILE
+echo "Interface count: $PORT_COUNT" >> $LOGFILE
 
 if [ "$PORT_COUNT" -eq 0 ]; then
-    echo "ERROR: No physical interfaces found!" >> "$LOGFILE"
+    echo "ERROR: No physical interfaces found!" >> $LOGFILE
     exit 1
 fi
 
-# 稳定排序（sort -V 自然排序）
-ifaces=$(echo "$ifaces" | tr ' ' '\n' | sort -V | tr '\n' ' ')
-ifaces=$(echo "$ifaces" | awk '{$1=$1};1')
-
-# ==================== LAN / WAN 分配（第一个 + 中间为 LAN，最后一个为 WAN） ====================
+# 3. 分配 LAN 端口组和 WAN 端口
 LAN_PORTS=""
 WAN_PORT=""
 set -- $ifaces
+
 if [ "$PORT_COUNT" -eq 1 ]; then
     LAN_PORTS="$1"
     WAN_PORT=""
-    echo "MODE: SINGLE" >> "$LOGFILE"
+    echo "MODE: SINGLE PORT (LAN only)" >> $LOGFILE
 elif [ "$PORT_COUNT" -eq 2 ]; then
     LAN_PORTS="$1"
     WAN_PORT="$2"
-    echo "MODE: DUAL" >> "$LOGFILE"
+    echo "MODE: DUAL PORT (LAN=$1, WAN=$2)" >> $LOGFILE
 else
+    # 多口：第一个为 LAN，最后一个为 WAN，中间全部为 LAN
     LAN_PORTS="$1"
-    WAN_PORT=$(eval echo \$$PORT_COUNT)
+    WAN_PORT=$(eval echo \$${PORT_COUNT})
     i=2
     while [ "$i" -lt "$PORT_COUNT" ]; do
         eval port=\$$i
         LAN_PORTS="$LAN_PORTS $port"
         i=$((i + 1))
     done
-    echo "MODE: MULTI" >> "$LOGFILE"
-fi
-echo "Final mapping: LAN=[$LAN_PORTS] WAN=[${WAN_PORT:-none}]" >> "$LOGFILE"
-
-# ==================== 确定管理 IP（优先级：用户参数 > 自定义文件 > 默认） ====================
-if [ -n "$lan_ip_address" ]; then
-    TARGET_IP="${lan_ip_address%%/*}"   # 去掉掩码部分
-else
-    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
-    if [ -f "$IP_VALUE_FILE" ]; then
-        TARGET_IP=$(head -n1 "$IP_VALUE_FILE" | cut -d'/' -f1 | tr -d ' \t')
-        echo "Loaded IP from custom file: $TARGET_IP" >> "$LOGFILE"
-    else
-        TARGET_IP="192.168.100.1"
-        echo "Using default IP: $TARGET_IP" >> "$LOGFILE"
-    fi
+    echo "MODE: MULTI PORT (LAN=$LAN_PORTS, WAN=$WAN_PORT)" >> $LOGFILE
 fi
 
-# ==================== 清理旧配置 ====================
+# 4. 清理旧的网络配置（避免冲突）
 uci -q delete network.lan
 uci -q delete network.wan
 uci -q delete network.wan6
 uci -q delete network.br_lan
 
-# ==================== 创建 LAN 桥接 ====================
-uci set network.br_lan=device
-uci set network.br_lan.name='br-lan'
-uci set network.br_lan.type='bridge'
-uci -q delete network.br_lan.ports
-for p in $LAN_PORTS; do
-    uci add_list network.br_lan.ports="$p"
-done
+# 5. 根据端口数量配置网络
+if [ "$PORT_COUNT" -eq 1 ]; then
+    # 单网口：直接使用物理接口作为 lan，不创建网桥
+    uci set network.lan=interface
+    uci set network.lan.device="$LAN_PORTS"
+    uci set network.lan.proto='static'
+    uci set network.lan.netmask='255.255.255.0'
 
-# ==================== LAN 接口配置 ====================
-uci set network.lan=interface
-uci set network.lan.device='br-lan'
-uci set network.lan.proto='static'
-uci set network.lan.ipaddr="$TARGET_IP"
-uci set network.lan.netmask='255.255.255.0'
-
-# 旁路由网关推导（.1 或 .254）
-GW_IP=$(echo "$TARGET_IP" | awk -F. '{print $1"."$2"."$3".1"}')
-[ "$GW_IP" = "$TARGET_IP" ] && GW_IP=$(echo "$TARGET_IP" | awk -F. '{print $1"."$2"."$3".254"}')
-uci set network.lan.gateway="$GW_IP"
-
-# DNS 设置
-uci -q delete network.lan.dns
-uci add_list network.lan.dns="$GW_IP"
-uci add_list network.lan.dns='223.5.5.5'
-uci add_list network.lan.dns='119.29.29.29'
-
-# ==================== WAN 接口配置（多口模式） ====================
-if [ -n "$WAN_PORT" ]; then
-    uci set network.wan=interface
-    uci set network.wan.device="$WAN_PORT"
-    uci set network.wan.proto='dhcp'
-    uci set network.wan6=interface
-    uci set network.wan6.device="$WAN_PORT"
-    uci set network.wan6.proto='dhcpv6'
-
-    # PPPoE 判断（支持两种变量来源）
-    if [ "${enable_pppoe:-}" = "yes" ] || { [ -n "${pppoe_account:-}" ] && [ -n "${pppoe_password:-}" ]; } || { [ -n "$pppoe_username" ] && [ -n "$pppoe_password" ]; }; then
-        # 优先使用 pppoe_account/pppoe_password，否则使用 pppoe_username/pppoe_password
-        _user="${pppoe_account:-$pppoe_username}"
-        _pass="${pppoe_password:-$pppoe_password}"
-        uci set network.wan.proto='pppoe'
-        uci set network.wan.username="$_user"
-        uci set network.wan.password="$_pass"
-        uci set network.wan.peerdns='1'
-        uci set network.wan.auto='1'
-        uci set network.wan6.proto='none'
-        echo "PPPoE enabled with account: $_user" >> "$LOGFILE"
+    # 读取用户自定义 IP（面板可指定）
+    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
+    if [ -f "$IP_VALUE_FILE" ]; then
+        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
+        uci set network.lan.ipaddr="$CUSTOM_IP"
+        echo "Custom router IP is $CUSTOM_IP" >> $LOGFILE
+    else
+        uci set network.lan.ipaddr='192.168.100.1'
+        echo "Default router IP is 192.168.100.1" >> $LOGFILE
     fi
-else
-    # ========== 单网口模式：彻底关闭 DHCP ==========
+
+    # 禁用 LAN 口的 DHCP 服务（单网口模式下不向下游分配 IP）
     uci -q get dhcp.lan >/dev/null 2>&1 || uci set dhcp.lan=dhcp
     uci set dhcp.lan.ignore='1'
     uci set dhcp.lan.ra='disabled'
     uci set dhcp.lan.dhcpv6='disabled'
-    echo "Single port mode: DHCP fully disabled" >> "$LOGFILE"
+    echo "Single port mode: DHCP disabled on LAN" >> $LOGFILE
+
+else
+    # 多网口：创建网桥 br-lan 并绑定所有 LAN 端口
+    uci set network.br_lan=device
+    uci set network.br_lan.name='br-lan'
+    uci set network.br_lan.type='bridge'
+    uci -q delete network.br_lan.ports
+    for p in $LAN_PORTS; do
+        uci add_list network.br_lan.ports="$p"
+    done
+
+    # 配置 LAN 接口
+    uci set network.lan=interface
+    uci set network.lan.device='br-lan'
+    uci set network.lan.proto='static'
+    uci set network.lan.netmask='255.255.255.0'
+
+    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
+    if [ -f "$IP_VALUE_FILE" ]; then
+        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
+        uci set network.lan.ipaddr="$CUSTOM_IP"
+        echo "Custom router IP is $CUSTOM_IP" >> $LOGFILE
+    else
+        uci set network.lan.ipaddr='192.168.100.1'
+        echo "Default router IP is 192.168.100.1" >> $LOGFILE
+    fi
+
+    # 配置 WAN 接口（DHCP 客户端）
+    uci set network.wan=interface
+    uci set network.wan.device="$WAN_PORT"
+    uci set network.wan.proto='dhcp'
+
+    uci set network.wan6=interface
+    uci set network.wan6.device="$WAN_PORT"
+    uci set network.wan6.proto='dhcpv6'
+
+    # PPPoE 覆盖（如果启用）
+    echo "enable_pppoe value: $enable_pppoe" >> $LOGFILE
+    if [ "$enable_pppoe" = "yes" ]; then
+        echo "PPPoE enabled, configuring..." >> $LOGFILE
+        uci set network.wan.proto='pppoe'
+        uci set network.wan.username="$pppoe_account"
+        uci set network.wan.password="$pppoe_password"
+        uci set network.wan.peerdns='1'
+        uci set network.wan.auto='1'
+        uci set network.wan6.proto='none'
+        echo "PPPoE config done." >> $LOGFILE
+    else
+        echo "PPPoE not enabled." >> $LOGFILE
+    fi
 fi
 
 uci commit network
 uci commit dhcp
 
-# ==================== WiFi 配置（如果存在无线网卡） ====================
-if uci get wireless.@wifi-device[0] >/dev/null 2>&1; then
-    if [ -n "$wlan_name" ] && [ -n "$wlan_password" ] && [ ${#wlan_password} -ge 8 ]; then
-        uci set wireless.@wifi-device[0].disabled='0'
-        uci set wireless.@wifi-iface[0].disabled='0'
-        uci set wireless.@wifi-iface[0].ssid="$wlan_name"
-        uci set wireless.@wifi-iface[0].encryption='psk2'
-        uci set wireless.@wifi-iface[0].key="$wlan_password"
-        uci commit wireless
-        echo "WiFi configured: SSID=$wlan_name" >> "$LOGFILE"
-    fi
-fi
+# ==================== 以下保持作者原样 ====================
 
-# ==================== root 密码设置 ====================
-if [ -n "$root_password" ]; then
-    echo "root:$root_password" | chpasswd
-    echo "Root password set" >> "$LOGFILE"
-fi
-
-# ==================== Docker 防火墙规则（如果安装了 Docker） ====================
+# 若安装了dockerd 则设置docker的防火墙规则
 if command -v dockerd >/dev/null 2>&1; then
+    echo "检测到 Docker，正在配置防火墙规则..." >> $LOGFILE
     FW_FILE="/etc/config/firewall"
-    # 清理旧的 docker 相关转发规则
-    uci -q delete firewall.docker
+    uci delete firewall.docker 2>/dev/null
+    # 删除所有与 docker 相关的 forwarding
     for idx in $(uci show firewall | grep "=forwarding" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
         src=$(uci get firewall.@forwarding[$idx].src 2>/dev/null)
         dest=$(uci get firewall.@forwarding[$idx].dest 2>/dev/null)
@@ -203,51 +173,45 @@ if command -v dockerd >/dev/null 2>&1; then
         fi
     done
     uci commit firewall
-    # 添加 docker zone 和转发规则
+    # 追加 docker zone 和 forwarding 规则
     cat <<EOF >> "$FW_FILE"
-
 config zone 'docker'
     option input 'ACCEPT'
     option output 'ACCEPT'
     option forward 'ACCEPT'
     option name 'docker'
     list subnet '172.16.0.0/12'
-
 config forwarding
     option src 'docker'
     option dest 'lan'
-
 config forwarding
     option src 'docker'
     option dest 'wan'
-
 config forwarding
     option src 'lan'
     option dest 'docker'
 EOF
-    echo "Docker firewall rules added" >> "$LOGFILE"
+else
+    echo "未检测到 Docker，跳过防火墙配置。" >> $LOGFILE
 fi
 
-# ==================== 终端与 SSH 权限 ====================
-uci -q delete ttyd.@ttyd[0].interface 2>/dev/null
-uci set dropbear.@dropbear[0].Interface='' 2>/dev/null
-uci commit dropbear 2>/dev/null
-echo "SSH and ttyd bindings cleared" >> "$LOGFILE"
+# 设置所有网口可访问网页终端
+uci delete ttyd.@ttyd[0].interface 2>/dev/null
 
-# ==================== 修改编译信息 ====================
-sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='Packaged by wukongdaily'/" /etc/openwrt_release 2>/dev/null
-echo "Release info updated" >> "$LOGFILE"
+# 设置所有网口可连接 SSH
+uci set dropbear.@dropbear[0].Interface=''
+uci commit
 
-# ==================== zsh 修复（如果安装了 advancedplus） ====================
+# 设置编译作者信息
+FILE_PATH="/etc/openwrt_release"
+NEW_DESCRIPTION="Packaged by wukongdaily"
+sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
+
+# 若luci-app-advancedplus已安装则去除zsh调用
 if opkg list-installed | grep -q '^luci-app-advancedplus '; then
-    sed -i '/\/usr\/bin\/zsh/d' /etc/profile 2>/dev/null
-    sed -i '/\/bin\/zsh/d' /etc/init.d/advancedplus 2>/dev/null
-    echo "Zsh profile fix applied" >> "$LOGFILE"
+    sed -i '/\/usr\/bin\/zsh/d' /etc/profile
+    sed -i '/\/bin\/zsh/d' /etc/init.d/advancedplus
+    sed -i '/\/usr\/bin\/zsh/d' /etc/init.d/advancedplus
 fi
 
-# ==================== 后台重载网络 ====================
-/etc/init.d/network reload >/dev/null 2>&1 &
-echo "Network reload triggered" >> "$LOGFILE"
-
-echo "=== 99-custom.sh finished at $(date) ===" >> "$LOGFILE"
 exit 0
