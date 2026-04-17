@@ -56,7 +56,9 @@ PACKAGES="$PACKAGES luci-i18n-argon-config-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
 PACKAGES="$PACKAGES xray-core"
+# PACKAGES="$PACKAGES hysteria luci-i18n-passwall-zh-cn"
 PACKAGES="$PACKAGES luci-app-openclash"
+PACKAGES="$PACKAGES luci-i18n-homeproxy-zh-cn"
 PACKAGES="$PACKAGES openssh-sftp-server"
 PACKAGES="$PACKAGES iperf3"
 PACKAGES="$PACKAGES luci-app-turboacc"
@@ -77,7 +79,7 @@ fi
 # ========== 修复首页缺失：仅当 luci-app-store 已启用时才添加 quickstart ==========
 # 检查 CUSTOM_PACKAGES 中是否包含 luci-app-store（由 workflow 的 enable_store 控制）
 if echo "$CUSTOM_PACKAGES" | grep -q "luci-app-store"; then
-    PACKAGES="$PACKAGES luci-i18n-quickstart-zh-cn"
+    PACKAGES="$PACKAGES quickstart luci-app-quickstart luci-i18n-quickstart-zh-cn"
     echo "Added luci-i18n-quickstart-zh-cn because luci-app-store is enabled"
 else
     echo "Skipping luci-i18n-quickstart-zh-cn (luci-app-store not enabled)"
