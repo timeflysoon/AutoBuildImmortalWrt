@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 任何命令失败立即退出
+set -e
 
 # Log file for debugging
 source shell/custom-packages.sh
@@ -39,7 +39,6 @@ fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建固件..."
 
-# ============= imm仓库内的插件 =============
 PACKAGES=""
 PACKAGES="$PACKAGES curl"
 PACKAGES="$PACKAGES luci-i18n-diskman-zh-cn"
@@ -61,6 +60,14 @@ if [ "$INCLUDE_DOCKER" = "yes" ]; then
     echo "Adding package: luci-i18n-dockerman-zh-cn"
 fi
 
+# 确保 luci-app-store 被包含（quickstart 强依赖，用于修复首页缺失）
+if ! echo "$PACKAGES" | grep -q "luci-app-store"; then
+    PACKAGES="$PACKAGES luci-app-store"
+    echo "Added luci-app-store to packages"
+fi
+
+# 注意：quickstart 相关 ipk 已经通过 extra-packages 同步并自动处理，无需额外下载解包
+
 if echo "$PACKAGES" | grep -q "luci-app-openclash"; then
     echo "✅ 已选择 luci-app-openclash，添加 openclash core"
     mkdir -p files/etc/openclash/core
@@ -73,54 +80,6 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
-# ==================== 安装 quickstart 插件（修复首页缺失） ====================
-echo "Installing luci-app-quickstart and dependencies..."
-
-# 确保 luci-app-store 被包含（quickstart 强依赖）
-if ! echo "$PACKAGES" | grep -q "luci-app-store"; then
-    PACKAGES="$PACKAGES luci-app-store"
-    echo "Added luci-app-store to packages"
-fi
-
-# 注意：不将 quickstart 相关包名加入 PACKAGES，只通过手动解包方式注入，避免版本冲突
-
-# 下载并解包 ipk 到 files（稳健的 ar 解包方式）
-QUICKSTART_TMP=$(mktemp -d)
-cd "$QUICKSTART_TMP" || exit 1
-
-# 定义带失败检测的 wget 函数
-download_file() {
-    local url=$1
-    local output=$2
-    echo "Downloading $output ..."
-    wget -q --timeout=30 --tries=3 "$url" -O "$output" || { echo "❌ Download failed: $url"; exit 1; }
-}
-
-download_file "https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/quickstart_0.11.13-r1_x86_64.ipk" "quickstart.ipk"
-download_file "https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/luci-app-quickstart_0.12.4-r1_all.ipk" "luci-app-quickstart.ipk"
-download_file "https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/luci-i18n-quickstart-zh-cn_25.107.86262-725b97d_all.ipk" "luci-i18n-quickstart-zh-cn.ipk"
-
-FILES_DIR="/home/build/immortalwrt/files"
-mkdir -p "$FILES_DIR"
-
-for ipk in *.ipk; do
-    echo "Extracting $ipk ..."
-    mkdir -p tmp_extract
-    (cd tmp_extract && ar x "../$ipk" >/dev/null 2>&1)
-    if [ -f tmp_extract/data.tar.gz ]; then
-        tar --no-same-owner -xzf tmp_extract/data.tar.gz -C "$FILES_DIR"
-    else
-        echo "❌ Failed to extract $ipk (data.tar.gz missing)"
-        exit 1
-    fi
-    rm -rf tmp_extract
-done
-
-cd - >/dev/null
-rm -rf "$QUICKSTART_TMP"
-echo "Quickstart integration completed."
-
-# 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"
 
