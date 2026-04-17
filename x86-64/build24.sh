@@ -76,12 +76,50 @@ if [ "$INCLUDE_DOCKER" = "yes" ]; then
     echo "Adding package: luci-i18n-dockerman-zh-cn"
 fi
 
-# ========== 修复首页缺失：仅当 luci-app-store 已启用时才添加 quickstart ==========
+# ========== 修复首页缺失：编译时添加 + 运行时强制安装 ==========
 if echo "$CUSTOM_PACKAGES" | grep -q "luci-app-store"; then
-    PACKAGES="$PACKAGES quickstart"
-    PACKAGES="$PACKAGES luci-app-quickstart"
-    PACKAGES="$PACKAGES luci-i18n-quickstart-zh-cn"
-    echo "Added QuickStart components because luci-app-store is enabled"
+    echo "luci-app-store is enabled. Adding QuickStart components..."
+
+    # 方式一：编译时加入包（推荐主方式）
+    PACKAGES="$PACKAGES quickstart luci-app-quickstart luci-i18n-quickstart-zh-cn"
+
+    # 方式二：同时准备运行时强制安装脚本（双保险，防止首页依然异常）
+    cat << 'EOF' > /home/build/immortalwrt/files/etc/uci-defaults/99-quickstart-fix.sh
+#!/bin/sh
+# QuickStart 首页修复 - 首次启动时执行
+
+echo "=== Running QuickStart fix ===" >> /tmp/quickstart-fix.log
+
+# 如果已经正常安装则跳过
+if opkg list-installed | grep -q "luci-app-quickstart"; then
+    echo "QuickStart already installed, skipping." >> /tmp/quickstart-fix.log
+    exit 0
+fi
+
+echo "luci-app-store is enabled. Installing QuickStart components via wget + opkg..." >> /tmp/quickstart-fix.log
+
+URL1="https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/quickstart_0.11.13-r1_x86_64.ipk"
+URL2="https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/luci-app-quickstart_0.12.4-r1_all.ipk"
+URL3="https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/luci-i18n-quickstart-zh-cn_25.107.86262-725b97d_all.ipk"
+
+wget -q -P /tmp "$URL1" || echo "Warning: failed to download $URL1" >> /tmp/quickstart-fix.log
+wget -q -P /tmp "$URL2" || echo "Warning: failed to download $URL2" >> /tmp/quickstart-fix.log
+wget -q -P /tmp "$URL3" || echo "Warning: failed to download $URL3" >> /tmp/quickstart-fix.log
+
+opkg install --force-overwrite /tmp/quickstart_0.11.13-r1_x86_64.ipk >> /tmp/quickstart-fix.log 2>&1
+opkg install --force-overwrite /tmp/luci-app-quickstart_0.12.4-r1_all.ipk >> /tmp/quickstart-fix.log 2>&1
+opkg install --force-overwrite /tmp/luci-i18n-quickstart-zh-cn_25.107.86262-725b97d_all.ipk >> /tmp/quickstart-fix.log 2>&1
+
+rm -f /tmp/quickstart*.ipk /tmp/luci-app-quickstart*.ipk /tmp/luci-i18n-quickstart*.ipk
+
+echo "QuickStart components installed successfully." >> /tmp/quickstart-fix.log
+/etc/init.d/uhttpd restart
+EOF
+
+    chmod +x /home/build/immortalwrt/files/etc/uci-defaults/99-quickstart-fix.sh
+
+    echo "QuickStart components added (compile-time + runtime fix)."
+
 else
     echo "Skipping QuickStart components (luci-app-store not enabled)"
 fi
