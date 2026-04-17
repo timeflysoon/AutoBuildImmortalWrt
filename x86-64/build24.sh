@@ -73,11 +73,14 @@ if [ "$INCLUDE_DOCKER" = "yes" ]; then
     echo "Adding package: luci-i18n-dockerman-zh-cn"
 fi
 
-# ========== 修复首页缺失：添加依赖并确保顺序 ==========
-# luci-app-quickstart 强依赖 luci-app-store，必须先添加
-PACKAGES="$PACKAGES luci-app-store"
-PACKAGES="$PACKAGES luci-i18n-quickstart-zh-cn"
-echo "Added luci-app-store and luci-i18n-quickstart-zh-cn for homepage fix"
+# ========== 修复首页缺失：仅当 luci-app-store 已启用时才添加 quickstart ==========
+# 检查 CUSTOM_PACKAGES 中是否包含 luci-app-store（由 workflow 的 enable_store 控制）
+if echo "$CUSTOM_PACKAGES" | grep -q "luci-app-store"; then
+    PACKAGES="$PACKAGES luci-i18n-quickstart-zh-cn"
+    echo "Added luci-i18n-quickstart-zh-cn because luci-app-store is enabled"
+else
+    echo "Skipping luci-i18n-quickstart-zh-cn (luci-app-store not enabled)"
+fi
 
 # 若构建openclash 则添加内核
 if echo "$PACKAGES" | grep -q "luci-app-openclash"; then
