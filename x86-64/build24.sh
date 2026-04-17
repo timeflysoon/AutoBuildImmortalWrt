@@ -76,27 +76,37 @@ if [ "$INCLUDE_DOCKER" = "yes" ]; then
     echo "Adding package: luci-i18n-dockerman-zh-cn"
 fi
 
-# ========== 修复首页缺失：编译时添加 + 运行时强制安装 ==========
+# ========== 修复首页缺失：编译时添加 + 运行时强制安装（双保险） ==========
 if echo "$CUSTOM_PACKAGES" | grep -q "luci-app-store"; then
     echo "luci-app-store is enabled. Adding QuickStart components..."
 
-    # 方式一：编译时加入包（推荐主方式）
+    # 方式一：编译时加入包（主方式，从本地 packages 目录优先安装）
     PACKAGES="$PACKAGES quickstart luci-app-quickstart luci-i18n-quickstart-zh-cn"
 
-    # 方式二：同时准备运行时强制安装脚本（双保险，防止首页依然异常）
+    # 方式二：准备运行时强制修复脚本（双保险）
     cat << 'EOF' > /home/build/immortalwrt/files/etc/uci-defaults/99-quickstart-fix.sh
 #!/bin/sh
-# QuickStart 首页修复 - 首次启动时执行
+# QuickStart 首页和网络向导修复 - 首次启动时执行
 
-echo "=== Running QuickStart fix ===" >> /tmp/quickstart-fix.log
+echo "=== Running QuickStart fix at $(date) ===" >> /tmp/quickstart-fix.log
 
 # 如果已经正常安装则跳过
-if opkg list-installed | grep -q "luci-app-quickstart"; then
+if opkg list-installed | grep -q "^luci-app-quickstart[[:space:]]"; then
     echo "QuickStart already installed, skipping." >> /tmp/quickstart-fix.log
     exit 0
 fi
 
-echo "luci-app-store is enabled. Installing QuickStart components via wget + opkg..." >> /tmp/quickstart-fix.log
+# 等待网络就绪（重要！尤其是PPPoE拨号场景）
+echo "Waiting for network..." >> /tmp/quickstart-fix.log
+for i in 1 2 3 4 5 6; do
+    if ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1; then
+        echo "Network is ready." >> /tmp/quickstart-fix.log
+        break
+    fi
+    sleep 5
+done
+
+echo "Installing QuickStart components via wget + opkg..." >> /tmp/quickstart-fix.log
 
 URL1="https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/quickstart_0.11.13-r1_x86_64.ipk"
 URL2="https://cdn.jsdelivr.net/gh/wukongdaily/store@master/run/x86/luci-app-quickstart/luci-app-quickstart_0.12.4-r1_all.ipk"
@@ -114,12 +124,12 @@ rm -f /tmp/quickstart*.ipk /tmp/luci-app-quickstart*.ipk /tmp/luci-i18n-quicksta
 
 echo "QuickStart components installed successfully." >> /tmp/quickstart-fix.log
 /etc/init.d/uhttpd restart
+echo "uhttpd restarted." >> /tmp/quickstart-fix.log
 EOF
 
     chmod +x /home/build/immortalwrt/files/etc/uci-defaults/99-quickstart-fix.sh
 
     echo "QuickStart components added (compile-time + runtime fix)."
-
 else
     echo "Skipping QuickStart components (luci-app-store not enabled)"
 fi
