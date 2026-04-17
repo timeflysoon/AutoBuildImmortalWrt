@@ -95,8 +95,8 @@ if [ "$PORT_COUNT" -eq 1 ]; then
         uci set network.lan.ipaddr="$CUSTOM_IP"
         echo "Custom router IP is $CUSTOM_IP" >> $LOGFILE
     else
-        uci set network.lan.ipaddr='192.168.2.1'
-        echo "Default router IP is 192.168.2.1" >> $LOGFILE
+        uci set network.lan.ipaddr='192.168.100.1'
+        echo "Default router IP is 192.168.100.1" >> $LOGFILE
     fi
 
     # 禁用 LAN 口的 DHCP 服务（单网口模式下不向下游分配 IP）
@@ -216,4 +216,3 @@ if opkg list-installed | grep -q '^luci-app-advancedplus '; then
 fi
 
 exit 0
-
